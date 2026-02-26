@@ -52,6 +52,15 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofd
 /*
 * LAB1: you may need to define sys_task_info here
 */
+///reads current proc data
+///copies task state, count, runtime, and read from current proc
+uint64 sys_task_info(TaskInfo *ti){
+	struct proc *p = curr_proc();
+	uint64 now = get_cycle();
+	p->taskinfo.time = (now-p->start_cycle)/(CPU_FREQ/1000);
+	*ti = p->taskinfo;
+	return 0;
+}
 
 extern char trap_page[];
 
@@ -66,6 +75,7 @@ void syscall()
 	/*
 	* LAB1: you may need to update syscall counter for task info here
 	*/
+curr_proc()->taskinfo.syscall_times[id]++;
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], args[1], args[2]);
@@ -82,6 +92,10 @@ void syscall()
 	/*
 	* LAB1: you may need to add SYS_taskinfo case here
 	*/
+	///calls func for sys call info
+	case SYS_task_info:
+		ret = sys_task_info((TaskInfo*) args[0]);
+		break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);

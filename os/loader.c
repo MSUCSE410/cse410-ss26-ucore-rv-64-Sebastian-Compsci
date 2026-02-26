@@ -70,6 +70,9 @@ int run_all_app()
 		/*
 		* LAB1: you may need to initialize your new fields of proc here
 		*/
+		///sets initial state for proc
+		p->taskinfo.status = Ready;
+		p->start_cycle = 0;
 	}
 	return 0;
 }
