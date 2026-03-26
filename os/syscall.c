@@ -32,17 +32,31 @@ uint64 sys_sched_yield()
 	return 0;
 }
 
+//gets current time for user processes
 uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofday in pagetable. (VA to PA)
 {
+
 	// YOUR CODE
-	val->sec = 0;
-	val->usec = 0;
+	// val->sec = 0;
+	// val->usec = 0;
 
 	/* The code in `ch3` will leads to memory bugs*/
+	struct proc *p = curr_proc();
+	//convert virtual to physical address
+	uint64 pa = useraddr(p->pagetable, (uint64)val);
 
-	// uint64 cycle = get_cycle();
-	// val->sec = cycle / CPU_FREQ;
-	// val->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
+	//invalid if 0
+	if (pa == 0){
+		return -1;
+	}
+	//kernel accessible pointer
+	TimeVal *tv = (TimeVal *)pa;
+
+	//cur time
+	uint64 cycle = get_cycle();
+	//microsecond conversion
+	tv->sec = cycle / CPU_FREQ;
+	tv->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
 	return 0;
 }
 
@@ -54,11 +68,130 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofd
 */
 ///reads current proc data
 ///copies task state, count, runtime, and read from current proc
+//sys call counts, runtime, status
 uint64 sys_task_info(TaskInfo *ti){
 	struct proc *p = curr_proc();
+	//user pointer to physical address
+	uint64 pa = useraddr(p->pagetable, (uint64)ti);
+	if(pa==0){
+		return -1;
+	}
+
+	//update runtime in miliseconds
 	uint64 now = get_cycle();
 	p->taskinfo.time = (now-p->start_cycle)/(CPU_FREQ/1000);
-	*ti = p->taskinfo;
+
+	//copy kernel structure to memeory
+	TaskInfo *pti = (TaskInfo *) pa;
+	*pti = p->taskinfo;
+	return 0;
+}
+
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flags, int fd){
+	struct proc *p = curr_proc();
+
+	if(start%PGSIZE != 0){
+		return -1;
+	}
+	// if(len%PGSIZE != 0){
+	// 	return -1;
+	// }
+
+	//1gb max and not 0
+	if(len == 0 || len > (1UL << 30)){
+		return -1;
+	}
+	//checks only RWX bits allowed
+	if((port & ~0x7) != 0){
+		return -1;
+	}
+
+	//permissions check, must have at least one
+	if ((port & 0x7) == 0){
+		return -1;
+	}
+	//rounding for pg bounds
+	uint64 va = PGROUNDDOWN(start);
+	uint64 end = PGROUNDUP(start + len);
+
+	///check all pages unmapped
+	for(uint64 i = va; i < end; i+=PGSIZE){
+		///walkaddr checks if the page is mapped in the page table
+		if(walkaddr(p->pagetable, i) != 0){
+			return -1;
+		}
+	}
+	for( ; va<end; va+=PGSIZE){
+
+		//check if mapped
+		if(walkaddr(p->pagetable, va) != 0){
+			return -1;
+		}
+
+		//physical page allocation
+		void *pa = kalloc();
+		if (pa == 0){
+			return -1;
+		}
+
+		///zero memeory out
+		memset(pa, 0, PGSIZE);
+
+		//convert port to PDE flags
+		int perm = PTE_U; ///user processes
+		//or used to set bits
+		if (port & 1){
+			perm |= PTE_R; //read
+		}
+		if(port & 2){
+			perm |= PTE_W; //write
+		}
+		if(port & 4){
+			perm |= PTE_X; //execute
+		}
+
+		//maps virtual addresses to physical addresses
+		if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) != 0){
+			kfree(pa); //cleans if failed
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+//removing mapping from pg table and freeing physical memory
+uint64 sys_munmap(uint64 start, uint64 len){
+	struct proc *p = curr_proc();
+	if(len==0){
+		return 0;
+	}
+
+	//page aligned only
+	if(start%PGSIZE != 0){
+		return -1;
+	}
+	if(len%PGSIZE != 0){
+		return -1;
+	}
+
+	uint64 va = start;
+	uint64 end = start+len;
+
+
+	//checks that all pages exist
+	for(uint64 i = va; i < end; i+=PGSIZE){
+		if(walkaddr(p->pagetable, i) == 0){
+			return -1;
+		}
+
+	}
+
+	uint64 npages = (end-va + PGSIZE-1)/PGSIZE; //# of pages
+	//remove mappings and frees physical memory
+	uvmunmap(p->pagetable, va, npages, 1);
+
 	return 0;
 }
 
@@ -95,6 +228,12 @@ curr_proc()->taskinfo.syscall_times[id]++;
 	///calls func for sys call info
 	case SYS_task_info:
 		ret = sys_task_info((TaskInfo*) args[0]);
+		break;
+	case SYS_mmap:
+		ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+		ret = sys_munmap(args[0], args[1]);
 		break;
 	default:
 		ret = -1;

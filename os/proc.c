@@ -35,7 +35,9 @@ void proc_init(void)
 		* LAB1: you may need to initialize your new fields of proc here
 		*/
 		///initialize syscall counter and runtime to zero for proc at boot time
-		p->taskinfo.status = UnInit;
+
+		//added status Ready, no longer running but runable
+		p->taskinfo.status = Ready;
 		for(int i = 0; i < MAX_SYSCALL_NUM; i++){
 			p->taskinfo.syscall_times[i] = 0;
 		}
@@ -99,6 +101,9 @@ void scheduler(void)
 					p->start_cycle = get_cycle();
 				}
 				p->state = RUNNING;
+				//now executing
+				//user program will see the status as running
+				p->taskinfo.status = Running;
 				current_proc = p;
 				swtch(&idle.context, &p->context);
 			}
@@ -125,6 +130,8 @@ void sched(void)
 void yield(void)
 {
 	current_proc->state = RUNNABLE;
+	//going to running to ready/runnable so status is ready
+	current_proc->taskinfo.status = Ready;
 	sched();
 }
 
