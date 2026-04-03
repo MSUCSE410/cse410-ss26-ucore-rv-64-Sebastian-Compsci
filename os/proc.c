@@ -4,6 +4,7 @@
 #include "trap.h"
 #include "vm.h"
 #include "queue.h"
+#include "timer.h"
 
 struct proc pool[NPROC];
 __attribute__((aligned(16))) char kstack[NPROC][PAGE_SIZE];
@@ -32,6 +33,18 @@ void proc_init()
 		p->state = UNUSED;
 		p->kstack = (uint64)kstack[p - pool];
 		p->trapframe = (struct trapframe *)trapframe[p - pool];
+		/*
+		* LAB1: you may need to initialize your new fields of proc here
+		*/
+		///initialize syscall counter and runtime to zero for proc at boot time
+
+		//added status Ready, no longer running but runable
+		p->taskinfo.status = Ready;
+		for(int i = 0; i < MAX_SYSCALL_NUM; i++){
+			p->taskinfo.syscall_times[i] = 0;
+		}
+		p->taskinfo.time = 0;
+		p->start_cycle = 0;
 	}
 	idle.kstack = (uint64)boot_stack_top;
 	idle.pid = IDLE_PID;
@@ -89,6 +102,9 @@ found:
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+	p->priority = 16; //default
+	p->stride = 0; //stride starts at 0
+	p->pass = 65536/p->priority; //big stride
 	return p;
 }
 
@@ -114,14 +130,41 @@ void scheduler()
 		if(has_proc == 0) {
 			panic("all app are over!\n");
 		}*/
-		p = fetch_task();
-		if (p == NULL) {
+		// p = fetch_task();
+		// if (p == NULL) {
+		// 	panic("all app are over!\n");
+		// }
+		///picks runnable process with the smallest stride
+		struct proc *best = NULL;
+		for(struct proc *pp = pool; pp < &pool[NPROC]; pp++){
+			if(pp->state == RUNNABLE){
+				//chooses process with smallest accumulated stride
+				if(best == NULL || pp->stride < best->stride){
+					best = pp;
+				}
+			}
+		}
+		if(best == NULL){
 			panic("all app are over!\n");
 		}
+		p = best;
 		tracef("swtich to proc %d", p - pool);
+		/*
+		* LAB1: you may need to init proc start time here
+		*/
+		//start cycle initialization
+		if(p->start_cycle == 0){
+			p->start_cycle = get_cycle();
+		}
 		p->state = RUNNING;
+		//now executing
+		//user program will see the status as running
+		p->taskinfo.status = Running;
 		current_proc = p;
 		swtch(&idle.context, &p->context);
+
+		///stride update
+		p->stride += p->pass;
 	}
 }
 
@@ -144,7 +187,8 @@ void sched()
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
+	//remove queue use
+	//add_task(current_proc);
 	sched();
 }
 
@@ -184,7 +228,7 @@ int fork()
 	np->trapframe->a0 = 0;
 	np->parent = p;
 	np->state = RUNNABLE;
-	add_task(np);
+	//add_task(np);
 	return np->pid;
 }
 
@@ -226,7 +270,7 @@ int wait(int pid, int *code)
 			return -1;
 		}
 		p->state = RUNNABLE;
-		add_task(p);
+		///add_task(p);
 		sched();
 	}
 }
