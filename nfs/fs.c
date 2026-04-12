@@ -205,6 +205,7 @@ uint ialloc(ushort type)
 	din.type = xshort(type);
 	din.size = xint(0);
 	// LAB4: You may want to init link count here
+	din.nlink = xint(1); ///initial link count
 	winode(inum, &din);
 	return inum;
 }

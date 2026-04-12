@@ -5,6 +5,7 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
+#include "stat.h"
 
 uint64 console_write(uint64 va, uint64 len)
 {
@@ -29,6 +30,137 @@ uint64 console_read(uint64 va, uint64 len)
 	}
 	copyout(p->pagetable, va, str, len);
 	return len;
+}
+
+/*
+* LAB1: you may need to define sys_task_info here
+*/
+///reads current proc data
+///copies task state, count, runtime, and read from current proc
+//sys call counts, runtime, status
+uint64 sys_task_info(TaskInfo *ti){
+	struct proc *p = curr_proc();
+	//user pointer to physical address
+	uint64 pa = useraddr(p->pagetable, (uint64)ti);
+	if(pa==0){
+		return -1;
+	}
+
+	//update runtime in miliseconds
+	uint64 now = get_cycle();
+	p->taskinfo.time = (now-p->start_cycle)/(CPU_FREQ/1000);
+
+	//copy kernel structure to memeory
+	TaskInfo *pti = (TaskInfo *) pa;
+	*pti = p->taskinfo;
+	return 0;
+}
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flags, int fd){
+	struct proc *p = curr_proc();
+
+	if(start%PGSIZE != 0){
+		return -1;
+	}
+	// if(len%PGSIZE != 0){
+	// 	return -1;
+	// }
+
+	//1gb max and not 0
+	if(len == 0 || len > (1UL << 30)){
+		return -1;
+	}
+	//checks only RWX bits allowed
+	if((port & ~0x7) != 0){
+		return -1;
+	}
+
+	//permissions check, must have at least one
+	if ((port & 0x7) == 0){
+		return -1;
+	}
+	//rounding for pg bounds
+	uint64 va = PGROUNDDOWN(start);
+	uint64 end = PGROUNDUP(start + len);
+
+	///check all pages unmapped
+	for(uint64 i = va; i < end; i+=PGSIZE){
+		///walkaddr checks if the page is mapped in the page table
+		if(walkaddr(p->pagetable, i) != 0){
+			return -1;
+		}
+	}
+	for( ; va<end; va+=PGSIZE){
+
+		//check if mapped
+		if(walkaddr(p->pagetable, va) != 0){
+			return -1;
+		}
+
+		//physical page allocation
+		void *pa = kalloc();
+		if (pa == 0){
+			return -1;
+		}
+
+		///zero memeory out
+		memset(pa, 0, PGSIZE);
+
+		//convert port to PDE flags
+		int perm = PTE_U; ///user processes
+		//or used to set bits
+		if (port & 1){
+			perm |= PTE_R; //read
+		}
+		if(port & 2){
+			perm |= PTE_W; //write
+		}
+		if(port & 4){
+			perm |= PTE_X; //execute
+		}
+
+		//maps virtual addresses to physical addresses
+		if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) != 0){
+			kfree(pa); //cleans if failed
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+//removing mapping from pg table and freeing physical memory
+uint64 sys_munmap(uint64 start, uint64 len){
+	struct proc *p = curr_proc();
+	if(len==0){
+		return 0;
+	}
+
+	//page aligned only
+	if(start%PGSIZE != 0){
+		return -1;
+	}
+	if(len%PGSIZE != 0){
+		return -1;
+	}
+
+	uint64 va = start;
+	uint64 end = start+len;
+
+
+	//checks that all pages exist
+	for(uint64 i = va; i < end; i+=PGSIZE){
+		if(walkaddr(p->pagetable, i) == 0){
+			return -1;
+		}
+
+	}
+
+	uint64 npages = (end-va + PGSIZE-1)/PGSIZE; //# of pages
+	//remove mappings and frees physical memory
+	uvmunmap(p->pagetable, va, npages, 1);
+
+	return 0;
 }
 
 uint64 sys_write(int fd, uint64 va, uint64 len)
@@ -145,13 +277,51 @@ uint64 sys_wait(int pid, uint64 va)
 uint64 sys_spawn(uint64 va)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+	struct proc *p = curr_proc();
+	char name[200];
+
+	//copying filename from user
+	if(copyinstr(p->pagetable, name, va, 200) < 0){
+		return -1;
+	}
+	//getting program id
+	//int id = get_id_by_name(name);
+	// if(id < 0){
+	// 	return -1;
+	// }
+
+	//alloc new process
+	struct proc *np = allocproc();
+	if(np==0){
+		return -1;
+	}
+	np->parent = p;
+
+	//loads program into new process
+	//loader(id, np);
+
+	//mark runnable
+	np->state = RUNNABLE;
+	//add_task(np);
+
+
+	return np->pid;
 }
 
 uint64 sys_set_priority(long long prio)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+	if(prio < 2){ ///prioity must be >2
+		return -1;
+	}
+
+	struct proc *p = curr_proc();
+	///updates process priority
+	p->priority = prio;
+	//redoes pass value (depends on priority)
+	//high priority gives smaller pass which gives slower stride growth
+	p->pass = 65536/p->priority;
+	return prio;
 }
 
 uint64 sys_openat(uint64 va, uint64 omode, uint64 _flags)
@@ -177,18 +347,152 @@ uint64 sys_close(int fd)
 	return 0;
 }
 
+///returns file infomration like inode number, type, linkc count
 int sys_fstat(int fd,uint64 stat){
 	//TODO: your job is to complete the syscall
-	return -1;
+	struct proc *p = curr_proc();
+
+	//validate file exists
+	if(fd < 0 || fd >= FD_BUFFER_SIZE || p->files[fd] == 0){
+		return -1;
+	}
+
+	//getting file structure from file table
+	struct file *f = p->files[fd];
+	//can only be regular inode files
+	if(f->type != FD_INODE){
+		return -1;
+	}
+
+	struct inode *ip = f->ip;
+
+	//setting stat default struct
+	struct Stat st;
+	st.dev = 0;
+	st.ino = ip->inum;
+	st.nlink = ip->nlink;
+	// st.mode = ip->type;
+
+	///file type flags from description
+	#define FILE (1 << 20)
+	#define DIR (1 << 21)
+
+
+	///file type from inode type
+	if(ip->type == T_FILE){
+		st.mode = FILE;
+	}
+	else if(ip->type == T_DIR){
+		st.mode = DIR;
+	}
+	else{
+		st.mode = 0;
+	}
+
+	//copy result back to user space
+	if(copyout(p->pagetable, stat, (char *)&st, sizeof(st)) < 0){
+		return -1;
+	}
+
+
+	return 0;
 }
 
+/// creates a new directory entry pointing to an existing node
+///increments nlink count and adds a new entry to the directory
 int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint64 flags){
 	//TODO: your job is to complete the syscall
-	return -1;
+	struct proc *p = curr_proc();
+	char oldpathchar[MAXPATH], newpathchar[MAXPATH];
+
+	///copy file path from user space to kernel space
+	if(copyinstr(p->pagetable, oldpathchar, oldpath, MAXPATH) < 0){
+		return -1;
+	}
+	if(copyinstr(p->pagetable, newpathchar, newpath, MAXPATH) < 0){
+		return -1;
+	}
+
+	///find inode of existing file
+	struct inode *ip = namei(oldpathchar);
+	if(ip == 0){
+		return -1;
+	}
+	///new directory entry for inode so increase nlink count
+	ip->nlink++;
+	iupdate(ip); //persists change to disk
+
+	
+	struct inode *dp = root_dir();
+	//adds new directory entry for inode
+	if (dirlink(dp, newpathchar, ip->inum) < 0){
+		//rollback if failed
+		ip->nlink--;
+		iupdate(ip);
+		iput(ip);
+		iput(dp);
+		return -1;
+	}
+	///releasign references
+	iput(ip);
+	iput(dp);
+	return 0;
 }
 
+///removes a directory entry and decrements the inode's nlink
+//will free data blocks of inode goes to 0
 int sys_unlinkat(int dirfd, uint64 name, uint64 flags){
 	//TODO: your job is to complete the syscall
+	struct proc *p = curr_proc();
+	char path[MAXPATH];
+
+	///copy path
+	if(copyinstr(p->pagetable, path, name, MAXPATH) < 0){
+		return -1;
+	}
+
+	struct inode *dp = root_dir();
+
+	///make sure inode loaded from disk
+	ivalid(dp);
+	struct dirent de;
+	uint off;
+
+	//search dict for matching filename
+	for(off = 0; off < dp->size; off+=sizeof(de)){
+		if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de)){
+			return -1;
+		}
+		if(de.inum == 0){
+			continue;
+		}
+		///match condition
+		if(strncmp(path, de.name, DIRSIZ) == 0){
+			struct inode *ip = namei(path);
+			if(ip==0){
+				iput(dp);
+				return -1;
+			}
+			///lock inode before changes
+			ivalid(ip);
+
+			//decrement and clear file entry
+			ip->nlink--;
+			de.inum = 0;
+			if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de)){
+				return -1;
+			}
+			///write updated inode to disk
+			iupdate(ip);
+
+			//release inode ref and directory inode
+			iput(ip);
+			iput(dp);
+	
+			return 0;
+		}
+	}
+	iput(dp);
 	return -1;
 }
 
@@ -247,8 +551,26 @@ void syscall()
 		break;
 	case SYS_unlinkat:
 	    ret = sys_unlinkat(args[0],args[1],args[2]);
+		break;
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
+		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
+		break;
+
+	/*
+	* LAB1: you may need to add SYS_taskinfo case here
+	*/
+	///calls func for sys call info
+	case SYS_task_info:
+		ret = sys_task_info((TaskInfo*) args[0]);
+		break;
+	case SYS_mmap:
+		ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+		ret = sys_munmap(args[0], args[1]);
 		break;
 	default:
 		ret = -1;
